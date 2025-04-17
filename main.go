@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,16 +12,17 @@ import (
 	"time"
 
 	jwt "github.com/dgrijalva/jwt-go"
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	_ "github.com/lib/pq"
 )
-
-type UUID string
-type Email string
 
 type Token struct {
 	Role Role
 	jwt.StandardClaims
 }
+type UUID string
+type Email string
 
 type User struct {
 	ID    UUID  `json:"id,omitempty"`
@@ -60,16 +62,10 @@ type PvzDTO struct {
 
 type City string
 
-// const (
-// 	CityMoscow          City = "Москва"
-// 	CitySaintPetersburg City = "Санкт-Петербург"
-// 	CityKazan           City = "Казань"
-// )
-
 const (
-	CityMoscow          City = "Moscow"
-	CitySaintPetersburg City = "Saint Petersburg"
-	CityKazan           City = "Kazan"
+	CityMoscow          City = "Москва"
+	CitySaintPetersburg City = "Санкт-Петербург"
+	CityKazan           City = "Казань"
 )
 
 func (c City) Valid() bool {
@@ -122,16 +118,10 @@ type ProductDTO struct {
 
 type Type string
 
-// const (
-// 	TypeElectronics Type = "электроника"
-// 	TypeClothes     Type = "одежда"
-// 	TypeShoes       Type = "обувь"
-// )
-
 const (
-	TypeElectronics Type = "electronics"
-	TypeClothes     Type = "clothes"
-	TypeShoes       Type = "shoes"
+	TypeElectronics Type = "электроника"
+	TypeClothes     Type = "одежда"
+	TypeShoes       Type = "обувь"
 )
 
 func (t Type) Valid() bool {
@@ -166,6 +156,18 @@ func RespondWithError(w http.ResponseWriter, err Error) {
 	json.NewEncoder(w).Encode(err)
 }
 
+type roleCtx string
+
+var roleKey roleCtx = "role"
+
+func putRoleIntoContext(ctx context.Context, role Role) context.Context {
+	return context.WithValue(ctx, roleKey, role)
+}
+
+func getRoleFromContext(ctx context.Context) Role {
+	return ctx.Value(roleKey).(Role)
+}
+
 func dummyLogin(w http.ResponseWriter, r *http.Request) {
 	var user UserDTO
 	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
@@ -193,7 +195,7 @@ func dummyLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func createPVZ(w http.ResponseWriter, r *http.Request) {
-	role := r.Context().Value("role")
+	role := getRoleFromContext(r.Context())
 	if role != RoleModerator {
 		RespondWithError(w, Error{
 			Code:    http.StatusForbidden,
@@ -220,9 +222,23 @@ func createPVZ(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uuid := UUID(uuid.NewString())
+	now := time.Now()
+	_, err := db.Exec("INSERT INTO pvz(id, registration_date, city) VALUES($1, $2, $3)",
+		uuid, now, city)
+	if err != nil {
+		log.Println("pvz insert error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "pvz was not created",
+		})
+		return
+	}
+
 	newPVZ := PVZ{
-		ID:               "1234567890",
-		RegistrationDate: time.Now(),
+		ID:               uuid,
+		RegistrationDate: now,
 		City:             city,
 	}
 
@@ -230,7 +246,7 @@ func createPVZ(w http.ResponseWriter, r *http.Request) {
 }
 
 func createReception(w http.ResponseWriter, r *http.Request) {
-	role := r.Context().Value("role")
+	role := getRoleFromContext(r.Context())
 	if role != RoleEmployee {
 		RespondWithError(w, Error{
 			Code:    http.StatusForbidden,
@@ -249,26 +265,61 @@ func createReception(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pvzID := reception.PvzID
-	if pvzID == "" {
+	_, err := db.Exec("SELECT id FROM pvz WHERE id=$1", pvzID)
+	if err != nil {
 		RespondWithError(w, Error{
 			Code:    http.StatusBadRequest,
-			Message: "empty pvzId",
+			Message: "pvz not found",
+		})
+		return
+	}
+
+	result, err := db.Exec("SELECT id FROM reception WHERE pvz_id=$1 AND in_progress=true", pvzID)
+	if err != nil {
+		log.Println("reception check error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "reception was not created",
+		})
+		return
+	}
+	receptionsInProgress, _ := result.RowsAffected()
+
+	if receptionsInProgress > 0 {
+		RespondWithError(w, Error{
+			Code:    http.StatusBadRequest,
+			Message: "other reception already in progress",
+		})
+		return
+	}
+
+	uuid := UUID(uuid.NewString())
+	now := time.Now()
+	_, err = db.Exec(`INSERT INTO reception(id, datetime, pvz_id, in_progress)
+		VALUES($1, $2, $3, $4)`, uuid, now, pvzID, true)
+	if err != nil {
+		log.Println("reception insert error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "reception was not created",
 		})
 		return
 	}
 
 	newReception := Reception{
-		ID:       "0987654321",
-		PvzID:    pvzID,
-		DateTime: time.Now(),
+		ID:       uuid,
+		DateTime: now,
 		Status:   StatusInProgress,
+		PvzID:    pvzID,
 	}
 
 	Respond(w, http.StatusCreated, newReception)
 }
 
 func closeLastReception(w http.ResponseWriter, r *http.Request) {
-	role := r.Context().Value("role")
+	role := getRoleFromContext(r.Context())
 	if role != RoleEmployee {
 		RespondWithError(w, Error{
 			Code:    http.StatusForbidden,
@@ -278,35 +329,62 @@ func closeLastReception(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pvzID := UUID(mux.Vars(r)["pvzId"])
-	if pvzID == "" {
+	_, err := db.Exec("SELECT id FROM pvz WHERE id=$1", pvzID)
+	if err != nil {
 		RespondWithError(w, Error{
 			Code:    http.StatusBadRequest,
-			Message: "empty pvzId",
+			Message: "pvz not found",
 		})
 		return
 	}
 
-	reception := Reception{
-		ID:       "0987654321",
-		PvzID:    pvzID,
-		DateTime: time.Now(),
-		Status:   StatusInProgress,
+	var reception Reception
+	var inProgress bool
+	row := db.QueryRow(`SELECT id, datetime, in_progress FROM reception
+		WHERE pvz_id=$1 ORDER BY datetime DESC LIMIT 1`, pvzID)
+	if err := row.Scan(&reception.ID, &reception.DateTime, &inProgress); err != nil {
+		if err == sql.ErrNoRows {
+			RespondWithError(w, Error{
+				Code:    http.StatusBadRequest,
+				Message: "no reception in progress",
+			})
+			return
+		}
+		log.Println("reception close error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "reception was not closed",
+		})
+		return
 	}
-
-	if reception.Status == StatusClose {
+	if !inProgress {
 		RespondWithError(w, Error{
 			Code:    http.StatusBadRequest,
 			Message: "reception already closed",
 		})
 		return
 	}
+
+	_, err = db.Exec("UPDATE reception SET in_progress=false WHERE id=$1", reception.ID)
+	if err != nil {
+		log.Println("reception update error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "reception was not closed",
+		})
+		return
+	}
+
+	reception.PvzID = pvzID
 	reception.Status = StatusClose
 
 	Respond(w, http.StatusOK, reception)
 }
 
 func createProduct(w http.ResponseWriter, r *http.Request) {
-	role := r.Context().Value("role")
+	role := getRoleFromContext(r.Context())
 	if role != RoleEmployee {
 		RespondWithError(w, Error{
 			Code:    http.StatusForbidden,
@@ -324,15 +402,6 @@ func createProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pvzID := product.PvzID
-	if pvzID == "" {
-		RespondWithError(w, Error{
-			Code:    http.StatusBadRequest,
-			Message: "empty pvzId",
-		})
-		return
-	}
-
 	productType := product.Type
 	if !productType.Valid() {
 		RespondWithError(w, Error{
@@ -342,18 +411,70 @@ func createProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pvzID := product.PvzID
+	_, err := db.Exec("SELECT id FROM pvz WHERE id=$1", pvzID)
+	if err != nil {
+		RespondWithError(w, Error{
+			Code:    http.StatusBadRequest,
+			Message: "pvz not found",
+		})
+		return
+	}
+
+	var reception Reception
+	var inProgress bool
+	row := db.QueryRow(`SELECT id, datetime, in_progress FROM reception
+		WHERE pvz_id=$1 ORDER BY datetime DESC LIMIT 1`, pvzID)
+	if err := row.Scan(&reception.ID, &reception.DateTime, &inProgress); err != nil {
+		if err == sql.ErrNoRows {
+			RespondWithError(w, Error{
+				Code:    http.StatusBadRequest,
+				Message: "no reception in progress",
+			})
+			return
+		}
+		log.Println("reception recieve error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "product was not created",
+		})
+		return
+	}
+	if !inProgress {
+		RespondWithError(w, Error{
+			Code:    http.StatusBadRequest,
+			Message: "no reception in progress",
+		})
+		return
+	}
+
+	uuid := UUID(uuid.NewString())
+	now := time.Now()
+	_, err = db.Exec(`INSERT INTO product(id, datetime, type, reception_id)
+		VALUES($1, $2, $3, $4)`, uuid, now, productType, reception.ID)
+	if err != nil {
+		log.Println("product insert error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "product was not created",
+		})
+		return
+	}
+
 	newProduct := Product{
-		ID:          "1029384756",
-		DateTime:    time.Now(),
+		ID:          uuid,
+		DateTime:    now,
 		Type:        productType,
-		ReceptionID: "0987654321",
+		ReceptionID: reception.ID,
 	}
 
 	Respond(w, http.StatusCreated, newProduct)
 }
 
 func deleteLastProduct(w http.ResponseWriter, r *http.Request) {
-	role := r.Context().Value("role")
+	role := getRoleFromContext(r.Context())
 	if role != RoleEmployee {
 		RespondWithError(w, Error{
 			Code:    http.StatusForbidden,
@@ -363,25 +484,70 @@ func deleteLastProduct(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pvzID := UUID(mux.Vars(r)["pvzId"])
-	if pvzID == "" {
+	_, err := db.Exec("SELECT id FROM pvz WHERE id=$1", pvzID)
+	if err != nil {
 		RespondWithError(w, Error{
 			Code:    http.StatusBadRequest,
-			Message: "empty pvzId",
+			Message: "pvz not found",
 		})
 		return
 	}
 
-	reception := Reception{
-		ID:       "0987654321",
-		PvzID:    pvzID,
-		DateTime: time.Now(),
-		Status:   StatusInProgress,
+	var reception Reception
+	var inProgress bool
+	row := db.QueryRow(`SELECT id, datetime, in_progress FROM reception
+		WHERE pvz_id=$1 ORDER BY datetime DESC LIMIT 1`, pvzID)
+	if err := row.Scan(&reception.ID, &reception.DateTime, &inProgress); err != nil {
+		if err == sql.ErrNoRows {
+			RespondWithError(w, Error{
+				Code:    http.StatusBadRequest,
+				Message: "no reception in progress",
+			})
+			return
+		}
+		log.Println("product delete error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "product was not deleted",
+		})
+		return
 	}
-
-	if reception.Status == StatusClose {
+	if !inProgress {
 		RespondWithError(w, Error{
 			Code:    http.StatusBadRequest,
-			Message: "reception is closed",
+			Message: "no reception in progress",
+		})
+		return
+	}
+
+	var productID UUID
+	row = db.QueryRow(`SELECT id FROM product WHERE reception_id=$1
+		ORDER BY datetime DESC LIMIT 1`, reception.ID)
+	if err := row.Scan(&productID); err != nil {
+		if err == sql.ErrNoRows {
+			RespondWithError(w, Error{
+				Code:    http.StatusBadRequest,
+				Message: "no products to delete",
+			})
+			return
+		}
+		log.Println("product select error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "product was not deleted",
+		})
+		return
+	}
+
+	_, err = db.Exec("DELETE FROM product WHERE id=$1", productID)
+	if err != nil {
+		log.Println("product delete error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "product was not deleted",
 		})
 		return
 	}
@@ -439,12 +605,67 @@ var JwtAuthentication = func(next http.Handler) http.Handler {
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), "role", tk.Role)
+		ctx := putRoleIntoContext(r.Context(), tk.Role)
 		r = r.WithContext(ctx)
 
 		next.ServeHTTP(w, r)
 	})
 }
+
+func dbConnect(user, password, dbname string) (*sql.DB, error) {
+	conn := fmt.Sprintf(
+		"user=%s password=%s dbname=%s sslmode=disable",
+		user, password, dbname,
+	)
+	db, err := sql.Open("postgres", conn)
+	if err != nil {
+		return nil, err
+	}
+	if err = db.Ping(); err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
+func dbSetup(db *sql.DB) error {
+	queries := []string{
+		// "DROP TYPE IF EXISTS pvz_city",
+		// "CREATE TYPE pvz_city AS ENUM ('Москва', 'Санкт-Петербург', 'Казань')",
+		// `CREATE TABLE IF NOT EXISTS pvz (
+		// 	id uuid primary key,
+		// 	registration_date timestamptz default now(),
+		// 	city pvz_city
+		// )`,
+		`CREATE TABLE IF NOT EXISTS pvz (
+			id uuid primary key,
+			registration_date timestamptz default now(),
+			city varchar(50) not null
+		)`,
+		`CREATE TABLE IF NOT EXISTS reception (
+			id uuid primary key,
+			datetime timestamptz default now(),
+			pvz_id uuid,
+			in_progress bool default true
+		)`,
+		`CREATE TABLE IF NOT EXISTS product (
+			id uuid primary key,
+			datetime timestamptz default now(),
+			type varchar(50) not null,
+			reception_id uuid
+		)`,
+	}
+
+	for _, query := range queries {
+		_, err := db.Exec(query)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+var db *sql.DB
 
 func main() {
 	fmt.Println(" \n[ AVITO INTERNSHIP ]\n ")
@@ -459,6 +680,17 @@ func main() {
 	router.HandleFunc("/pvz/{pvzId}/delete_last_product", deleteLastProduct).Methods("POST")
 
 	router.Use(JwtAuthentication)
+
+	var err error
+	db, err = dbConnect("postgres", "admin", "avito")
+	if err != nil {
+		log.Fatalf("database connection error: %v", err)
+	}
+	defer db.Close()
+
+	if err = dbSetup(db); err != nil {
+		log.Fatalf("database setup error: %v", err)
+	}
 
 	fmt.Println("Listening for connections...")
 	fmt.Println("(on http://localhost:8080)")
