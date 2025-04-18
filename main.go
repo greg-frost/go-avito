@@ -8,27 +8,29 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	jwt "github.com/dgrijalva/jwt-go"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 type Token struct {
 	Role Role
 	jwt.StandardClaims
 }
-type UUID string
-type Email string
 
 type User struct {
 	ID    UUID  `json:"id,omitempty"`
 	Email Email `json:"email"`
 	Role  Role  `json:"role"`
 }
+
+type UUID string
+type Email string
 
 type UserDTO struct {
 	Role Role `json:"role"`
@@ -60,6 +62,11 @@ type PvzDTO struct {
 	City City `json:"city"`
 }
 
+type PVZResult struct {
+	PVZ        PVZ               `json:"pvz"`
+	Receptions []ReceptionResult `json:"receptions"`
+}
+
 type City string
 
 const (
@@ -86,6 +93,11 @@ type Reception struct {
 
 type ReceptionDTO struct {
 	PvzID UUID `json:"pvzId"`
+}
+
+type ReceptionResult struct {
+	Reception Reception `json:"reception"`
+	Products  []Product `json:"products"`
 }
 
 type Status string
@@ -555,6 +567,197 @@ func deleteLastProduct(w http.ResponseWriter, r *http.Request) {
 	Respond(w, http.StatusOK, nil)
 }
 
+func getSummary(w http.ResponseWriter, r *http.Request) {
+	role := getRoleFromContext(r.Context())
+	if role != RoleEmployee && role != RoleModerator {
+		RespondWithError(w, Error{
+			Code:    http.StatusForbidden,
+			Message: "only for employees and moderators",
+		})
+		return
+	}
+
+	pageInput := r.URL.Query().Get("page")
+	page, _ := strconv.Atoi(pageInput)
+	if page < 1 {
+		page = 1
+	}
+
+	limitInput := r.URL.Query().Get("limit")
+	limit, err := strconv.Atoi(limitInput)
+	if err != nil {
+		limit = 10
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 30 {
+		limit = 30
+	}
+
+	startDateInput := r.URL.Query().Get("startDate")
+	startDate, _ := time.Parse(time.RFC3339, startDateInput)
+
+	endDateInput := r.URL.Query().Get("endDate")
+	endDate, err := time.Parse(time.RFC3339, endDateInput)
+	if err != nil {
+		endDate = time.Now()
+	}
+
+	pvzs := make([]PVZ, 0, limit)
+	pvzIDs := make([]UUID, 0, limit)
+	pvzRows, err := db.Query(`
+		SELECT p.id, p.registration_date, p.city FROM pvz p JOIN reception r ON p.id=r.pvz_id
+		WHERE r.datetime BETWEEN $1 AND $2 GROUP BY p.id ORDER BY p.registration_date LIMIT $3 OFFSET $4`,
+		startDate, endDate, limit, (page-1)*limit,
+	)
+	if err != nil && err != sql.ErrNoRows {
+		log.Println("summary pvz select error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "internal server error",
+		})
+		return
+	}
+	defer pvzRows.Close()
+
+	for pvzRows.Next() {
+		var pvz PVZ
+		if err := pvzRows.Scan(&pvz.ID, &pvz.RegistrationDate, &pvz.City); err != nil {
+			log.Println("summary pvz rows scan error:", err)
+			RespondWithError(w, Error{
+				// Code:    http.StatusInternalServerError,
+				Code:    http.StatusBadRequest,
+				Message: "internal server error",
+			})
+			return
+		}
+		pvzs = append(pvzs, pvz)
+		pvzIDs = append(pvzIDs, pvz.ID)
+	}
+	if err := pvzRows.Err(); err != nil {
+		log.Println("summary pvz rows error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "internal server error",
+		})
+		return
+	}
+
+	receptions := make(map[UUID][]Reception, limit)
+	var receptionsIDs []UUID
+	receptionRows, err := db.Query(`
+		SELECT id, datetime, pvz_id, in_progress FROM reception
+		WHERE pvz_id=ANY($1) AND datetime BETWEEN $2 AND $3 ORDER BY datetime`,
+		pq.Array(pvzIDs), startDate, endDate,
+	)
+	if err != nil && err != sql.ErrNoRows {
+		log.Println("summary reception select error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "internal server error",
+		})
+		return
+	}
+	defer receptionRows.Close()
+
+	for receptionRows.Next() {
+		var reception Reception
+		var inProgress bool
+		if err := receptionRows.Scan(&reception.ID, &reception.DateTime,
+			&reception.PvzID, &inProgress); err != nil {
+			log.Println("summary reception rows scan error:", err)
+			RespondWithError(w, Error{
+				// Code:    http.StatusInternalServerError,
+				Code:    http.StatusBadRequest,
+				Message: "internal server error",
+			})
+			return
+		}
+		if inProgress {
+			reception.Status = StatusInProgress
+		} else {
+			reception.Status = StatusClose
+		}
+		receptions[reception.PvzID] = append(receptions[reception.PvzID], reception)
+		receptionsIDs = append(receptionsIDs, reception.ID)
+	}
+	if err := receptionRows.Err(); err != nil {
+		log.Println("summary reception rows error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "internal server error",
+		})
+		return
+	}
+
+	products := make(map[UUID][]Product, len(receptionsIDs))
+	productRows, err := db.Query(`
+		SELECT id, datetime, type, reception_id FROM product
+		WHERE reception_id=ANY($1) ORDER BY datetime`,
+		pq.Array(receptionsIDs),
+	)
+	if err != nil && err != sql.ErrNoRows {
+		log.Println("summary product select error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "internal server error",
+		})
+		return
+	}
+	defer productRows.Close()
+
+	for productRows.Next() {
+		var product Product
+		if err := productRows.Scan(&product.ID, &product.DateTime,
+			&product.Type, &product.ReceptionID); err != nil {
+			log.Println("summary product rows scan error:", err)
+			RespondWithError(w, Error{
+				// Code:    http.StatusInternalServerError,
+				Code:    http.StatusBadRequest,
+				Message: "internal server error",
+			})
+			return
+		}
+		products[product.ReceptionID] = append(products[product.ReceptionID], product)
+	}
+	if err := productRows.Err(); err != nil {
+		log.Println("summary product rows error:", err)
+		RespondWithError(w, Error{
+			// Code:    http.StatusInternalServerError,
+			Code:    http.StatusBadRequest,
+			Message: "internal server error",
+		})
+		return
+	}
+
+	summary := make([]PVZResult, 0, limit)
+	for _, pvz := range pvzs {
+		pvzResult := PVZResult{
+			PVZ:        pvz,
+			Receptions: make([]ReceptionResult, 0, len(receptions[pvz.ID])),
+		}
+		for _, reception := range receptions[pvz.ID] {
+			receptionResult := ReceptionResult{
+				Reception: reception,
+				Products:  []Product{},
+			}
+			if receptionProducts, ok := products[reception.ID]; ok {
+				receptionResult.Products = receptionProducts
+			}
+			pvzResult.Receptions = append(pvzResult.Receptions, receptionResult)
+		}
+		summary = append(summary, pvzResult)
+	}
+
+	Respond(w, http.StatusOK, summary)
+}
+
 var JwtAuthentication = func(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		skipAuth := []string{"/dummyLogin", "/register", "/login"}
@@ -678,6 +881,7 @@ func main() {
 	router.HandleFunc("/pvz/{pvzId}/close_last_reception", closeLastReception).Methods("POST")
 	router.HandleFunc("/products", createProduct).Methods("POST")
 	router.HandleFunc("/pvz/{pvzId}/delete_last_product", deleteLastProduct).Methods("POST")
+	router.HandleFunc("/", getSummary).Methods("GET")
 
 	router.Use(JwtAuthentication)
 
