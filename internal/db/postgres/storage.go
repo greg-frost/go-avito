@@ -1,23 +1,35 @@
-package storage
+package postgres
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/greg-frost/go-avito/internal/model"
+	s "github.com/greg-frost/go-avito/internal/storage"
 
 	"github.com/lib/pq"
 )
 
-type Storage struct {
+type storage struct {
 	db *sql.DB
 }
 
-func NewStorage(db *sql.DB) *Storage {
-	return &Storage{db: db}
+func NewStorage(params ConnectionParams) (s.Storage, error) {
+	db, err := connect(params)
+	if err != nil {
+		fmt.Println(err)
+		return nil, fmt.Errorf("db connect error: %w", err)
+	}
+
+	if err = setup(db); err != nil {
+		return nil, fmt.Errorf("db setup error: %w", err)
+	}
+
+	return &storage{db: db}, nil
 }
 
-func (s *Storage) CreatePVZ(pvz model.PVZ) error {
+func (s *storage) CreatePVZ(pvz model.PVZ) error {
 	_, err := s.db.Exec(`
 		INSERT INTO pvz(id, registration_date, city)
 		VALUES($1, $2, $3)`,
@@ -29,7 +41,7 @@ func (s *Storage) CreatePVZ(pvz model.PVZ) error {
 	return err
 }
 
-func (s *Storage) FindPVZ(pvzID string) (model.PVZ, error) {
+func (s *storage) FindPVZ(pvzID string) (model.PVZ, error) {
 	var pvz model.PVZ
 	row := s.db.QueryRow(`
 		SELECT id, registration_date, city
@@ -41,7 +53,7 @@ func (s *Storage) FindPVZ(pvzID string) (model.PVZ, error) {
 	return pvz, err
 }
 
-func (s *Storage) ListPVZ(page, limit int, startDate, endDate time.Time, filterByDate bool) (
+func (s *storage) ListPVZ(page, limit int, startDate, endDate time.Time, filterByDate bool) (
 	[]model.PVZ, error) {
 	results := make([]model.PVZ, 0, limit)
 
@@ -86,7 +98,7 @@ func (s *Storage) ListPVZ(page, limit int, startDate, endDate time.Time, filterB
 	return results, nil
 }
 
-func (s *Storage) CreateReception(reception model.Reception) error {
+func (s *storage) CreateReception(reception model.Reception) error {
 	_, err := s.db.Exec(`
 		INSERT INTO reception(id, datetime, pvz_id, status)
 		VALUES($1, $2, $3, $4)`,
@@ -99,7 +111,7 @@ func (s *Storage) CreateReception(reception model.Reception) error {
 	return err
 }
 
-func (s *Storage) FindLastReception(pvzID string) (model.Reception, error) {
+func (s *storage) FindLastReception(pvzID string) (model.Reception, error) {
 	var reception model.Reception
 	row := s.db.QueryRow(`
 		SELECT id, datetime, pvz_id, status
@@ -116,7 +128,7 @@ func (s *Storage) FindLastReception(pvzID string) (model.Reception, error) {
 	return reception, err
 }
 
-func (s *Storage) ListReceptions(pvzIDs []string, startDate, endDate time.Time) (
+func (s *storage) ListReceptions(pvzIDs []string, startDate, endDate time.Time) (
 	map[string][]model.Reception, error) {
 	results := make(map[string][]model.Reception, len(pvzIDs))
 
@@ -150,7 +162,7 @@ func (s *Storage) ListReceptions(pvzIDs []string, startDate, endDate time.Time) 
 	return results, nil
 }
 
-func (s *Storage) CloseReception(receptionID string) error {
+func (s *storage) CloseReception(receptionID string) error {
 	_, err := s.db.Exec(`
 		UPDATE reception
 		SET status=$1
@@ -162,7 +174,7 @@ func (s *Storage) CloseReception(receptionID string) error {
 	return err
 }
 
-func (s *Storage) CreateProduct(product model.Product) error {
+func (s *storage) CreateProduct(product model.Product) error {
 	_, err := s.db.Exec(`
 		INSERT INTO product(id, datetime, type, reception_id)
 		VALUES($1, $2, $3, $4)`,
@@ -175,7 +187,7 @@ func (s *Storage) CreateProduct(product model.Product) error {
 	return err
 }
 
-func (s *Storage) FindLastProduct(receptionID string) (model.Product, error) {
+func (s *storage) FindLastProduct(receptionID string) (model.Product, error) {
 	var product model.Product
 	row := s.db.QueryRow(`
 		SELECT id, datetime, type, reception_id
@@ -192,7 +204,7 @@ func (s *Storage) FindLastProduct(receptionID string) (model.Product, error) {
 	return product, err
 }
 
-func (s *Storage) ListProducts(receptionsIDs []string) (
+func (s *storage) ListProducts(receptionsIDs []string) (
 	map[string][]model.Product, error) {
 	results := make(map[string][]model.Product, len(receptionsIDs))
 
@@ -223,7 +235,7 @@ func (s *Storage) ListProducts(receptionsIDs []string) (
 	return results, nil
 }
 
-func (s *Storage) DeleteProduct(productID string) error {
+func (s *storage) DeleteProduct(productID string) error {
 	_, err := s.db.Exec(`
 		DELETE FROM product
 		WHERE id=$1`,

@@ -15,5 +15,6 @@ func PutRoleIntoContext(ctx context.Context, role model.Role) context.Context {
 }
 
 func GetRoleFromContext(ctx context.Context) model.Role {
-	return ctx.Value(roleKey).(model.Role)
+	value, _ := ctx.Value(roleKey).(model.Role)
+	return value
 }
