@@ -83,6 +83,8 @@ var Receptions = []model.Reception{
 }
 
 var Products = []model.Product{
+	Product,
+	Product,
 	{
 		ID:          uuid.NewString(),
 		DateTime:    time.Now(),
@@ -159,6 +161,15 @@ func (s *storage) ListPVZ(page, limit int, startDate, endDate time.Time, filterB
 	return results, nil
 }
 
+func (s *storage) DeletePVZ(pvzID string) error {
+	for _, pvz := range PVZs {
+		if pvzID == pvz.ID {
+			return nil
+		}
+	}
+	return errors.New("no pvzs to delete")
+}
+
 func (s *storage) CreateReception(reception model.Reception) error {
 	return nil
 }
@@ -202,6 +213,15 @@ func (s *storage) CloseReception(receptionID string) error {
 	return nil
 }
 
+func (s *storage) DeleteReception(receptionID string) error {
+	for _, reception := range Receptions {
+		if receptionID == reception.ID {
+			return nil
+		}
+	}
+	return errors.New("no receptions to delete")
+}
+
 func (s *storage) CreateProduct(product model.Product) error {
 	return nil
 }
@@ -232,8 +252,10 @@ func (s *storage) ListProducts(receptionsIDs []string) (
 }
 
 func (s *storage) DeleteProduct(productID string) error {
-	if productID != Product.ID {
-		return errors.New("no products to delete")
+	for _, product := range Products {
+		if productID == product.ID {
+			return nil
+		}
 	}
-	return nil
+	return errors.New("no products to delete")
 }

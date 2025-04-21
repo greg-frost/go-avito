@@ -18,7 +18,6 @@ type storage struct {
 func NewStorage(params ConnectionParams) (s.Storage, error) {
 	db, err := connect(params)
 	if err != nil {
-		fmt.Println(err)
 		return nil, fmt.Errorf("db connect error: %w", err)
 	}
 
@@ -98,6 +97,16 @@ func (s *storage) ListPVZ(page, limit int, startDate, endDate time.Time, filterB
 	return results, nil
 }
 
+func (s *storage) DeletePVZ(pvzID string) error {
+	_, err := s.db.Exec(`
+		DELETE FROM pvz
+		WHERE id=$1`,
+		pvzID,
+	)
+
+	return err
+}
+
 func (s *storage) CreateReception(reception model.Reception) error {
 	_, err := s.db.Exec(`
 		INSERT INTO reception(id, datetime, pvz_id, status)
@@ -168,6 +177,16 @@ func (s *storage) CloseReception(receptionID string) error {
 		SET status=$1
 		WHERE id=$2`,
 		model.StatusClose,
+		receptionID,
+	)
+
+	return err
+}
+
+func (s *storage) DeleteReception(receptionID string) error {
+	_, err := s.db.Exec(`
+		DELETE FROM reception
+		WHERE id=$1`,
 		receptionID,
 	)
 
